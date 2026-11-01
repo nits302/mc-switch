@@ -216,9 +216,10 @@ fn main() {
                                 replaced.label.as_deref().unwrap_or("an unknown account"),
                             );
                         }
-                        if provider == ProviderId::Codex {
+                        if matches!(provider, ProviderId::Codex | ProviderId::OpenCode) {
                             println!(
-                                "Note: a running Codex keeps the old account until restarted."
+                                "Note: a running {} keeps the old account until restarted.",
+                                provider.display_name()
                             );
                         }
                     }

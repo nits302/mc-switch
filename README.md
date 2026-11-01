@@ -1,6 +1,6 @@
 # MC Switch
 
-Switch between your **Claude Code**, **Codex**, **Cursor** and **Antigravity**
+Switch between your **Claude Code**, **Codex**, **Cursor**, **Antigravity** and **OpenCode**
 accounts in one click — without signing out — and see how much each account has left.
 
 A tray / menu bar app (Windows, macOS) plus an `mc-switch` command line.
@@ -9,7 +9,7 @@ A tray / menu bar app (Windows, macOS) plus an `mc-switch` command line.
 - **See every account's limits**: 5-hour, weekly or monthly, per model, reset times
   and pace, plus an **All accounts together** row per tool.
 - **Switch automatically** to the account with the most room left, and **warm up**
-  an account's next 5-hour window (Claude Code only).
+  an account's next 5-hour window (Claude Code and Codex).
 - **See what you used and what it would cost** at API prices, from the logs on your
   own computer.
 - **Private**: no server, no telemetry, no auto-updater. Parked logins are
@@ -26,6 +26,7 @@ A tray / menu bar app (Windows, macOS) plus an `mc-switch` command line.
 | Codex CLI | `~/.codex/auth.json` | a running Codex keeps the old account until restarted |
 | Cursor | `cursorAuth/*` rows of `<app data>/Cursor/User/globalStorage/state.vscdb` | MC Switch asks, quits Cursor, switches and reopens it |
 | Antigravity IDE | `antigravityUnifiedStateSync.*` rows of `<app data>/Antigravity IDE/User/globalStorage/state.vscdb` | same as Cursor |
+| OpenCode | `~/.local/share/opencode/auth.json` (all its services at once) | restart a running OpenCode; add accounts by saving the login it holds; no usage limits shown |
 
 `<app data>` is `%APPDATA%` on Windows and `~/Library/Application Support` on macOS.
 

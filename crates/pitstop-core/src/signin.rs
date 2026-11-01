@@ -43,6 +43,7 @@ pub fn program_name(provider: ProviderId) -> &'static str {
         ProviderId::Codex => "codex",
         ProviderId::Cursor => "Cursor",
         ProviderId::Antigravity => "Antigravity",
+        ProviderId::OpenCode => "opencode",
     }
 }
 
@@ -159,7 +160,7 @@ fn carried(provider: ProviderId, home: &Path) -> Option<PathBuf> {
     let programs = match provider {
         ProviderId::ClaudeCode => claude_carried(&claude_app_folders(home), home),
         ProviderId::Codex => codex_app_programs(home),
-        ProviderId::Cursor | ProviderId::Antigravity => return None,
+        ProviderId::Cursor | ProviderId::Antigravity | ProviderId::OpenCode => return None,
     };
     newest_runnable(programs)
 }
@@ -376,8 +377,9 @@ pub fn command(provider: ProviderId, program: &Path, dir: &Path, search: &[PathB
                 .env("CODEX_HOME", dir)
                 .current_dir(dir);
         }
-        // Editors don't sign in through a command: see `Session::start`.
-        ProviderId::Cursor | ProviderId::Antigravity => {}
+        // Editors don't sign in through a command, nor OpenCode (its own
+        // picker): see `Session::start`.
+        ProviderId::Cursor | ProviderId::Antigravity | ProviderId::OpenCode => {}
     }
     if let Ok(path) = std::env::join_paths(search) {
         cmd.env("PATH", path);
@@ -407,10 +409,12 @@ pub fn progress(provider: ProviderId, said: &str, since_code: &str) -> Progress 
             wants_code: said.contains("Paste code"),
             refused_code: plain(since_code).contains("Invalid code"),
         },
-        ProviderId::Codex | ProviderId::Cursor | ProviderId::Antigravity => Progress {
-            url,
-            ..Progress::default()
-        },
+        ProviderId::Codex | ProviderId::Cursor | ProviderId::Antigravity | ProviderId::OpenCode => {
+            Progress {
+                url,
+                ..Progress::default()
+            }
+        }
     }
 }
 
@@ -619,6 +623,9 @@ impl Session {
             ProviderId::Cursor => Self::in_browser(provider),
             ProviderId::Antigravity => Self::in_editor(provider, home),
             ProviderId::ClaudeCode | ProviderId::Codex => Self::by_command(provider, home),
+            ProviderId::OpenCode => Err(Error::SignIn(
+                "sign in inside OpenCode, then name the login it holds".into(),
+            )),
         }
     }
 

@@ -2,6 +2,7 @@ pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod cursor;
+pub mod opencode;
 
 use std::path::Path;
 
@@ -20,14 +21,17 @@ pub enum ProviderId {
     Cursor,
     #[serde(rename = "antigravity")]
     Antigravity,
+    #[serde(rename = "opencode")]
+    OpenCode,
 }
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 4] = [
+    pub const ALL: [ProviderId; 5] = [
         ProviderId::ClaudeCode,
         ProviderId::Codex,
         ProviderId::Cursor,
         ProviderId::Antigravity,
+        ProviderId::OpenCode,
     ];
 
     pub fn as_str(&self) -> &'static str {
@@ -36,6 +40,7 @@ impl ProviderId {
             ProviderId::Codex => "codex",
             ProviderId::Cursor => "cursor",
             ProviderId::Antigravity => "antigravity",
+            ProviderId::OpenCode => "opencode",
         }
     }
 
@@ -50,6 +55,7 @@ impl ProviderId {
             ProviderId::Codex => "Codex",
             ProviderId::Cursor => "Cursor",
             ProviderId::Antigravity => "Antigravity",
+            ProviderId::OpenCode => "OpenCode",
         }
     }
 
@@ -59,8 +65,9 @@ impl ProviderId {
             "codex" => Ok(ProviderId::Codex),
             "cursor" => Ok(ProviderId::Cursor),
             "antigravity" | "gemini" => Ok(ProviderId::Antigravity),
+            "opencode" => Ok(ProviderId::OpenCode),
             other => Err(Error::InvalidData(format!(
-                "unknown provider `{other}` (use claude-code, codex, cursor or antigravity)"
+                "unknown provider `{other}` (use claude-code, codex, cursor, antigravity or opencode)"
             ))),
         }
     }
@@ -132,5 +139,6 @@ pub fn provider_for(id: ProviderId) -> Box<dyn Provider> {
         ProviderId::Codex => Box::new(codex::Codex),
         ProviderId::Cursor => Box::new(cursor::Cursor),
         ProviderId::Antigravity => Box::new(antigravity::Antigravity),
+        ProviderId::OpenCode => Box::new(opencode::OpenCode),
     }
 }

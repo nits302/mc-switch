@@ -527,6 +527,11 @@ impl Request {
                         )
                     }),
             )),
+            // OpenCode has no limits of its own to read.
+            ProviderId::OpenCode => Ok(Request::Known(UsageReport::Ok(usage::Usage {
+                windows: Vec::new(),
+                plan: None,
+            }))),
         }
     }
 
@@ -1371,6 +1376,39 @@ mod tests {
             api.seen.lock().unwrap().as_slice(),
             [format!("{access_token}|ws-1")]
         );
+    }
+
+    #[test]
+    fn opencode_logins_park_and_switch_and_ask_no_one_for_usage() {
+        use crate::provider::opencode::OpenCode;
+        let a = r#"{"zai":{"type":"api","key":"key-a"}}"#;
+        let b = r#"{"zai":{"type":"api","key":"key-b"}}"#;
+        let host = FakeHost::new();
+        let path = OpenCode::auth_path(&host);
+        host.put_file(path.clone(), a);
+        let engine = Engine::new(host);
+        engine.enroll(ProviderId::OpenCode, "a").unwrap();
+        // Signed in to another inside OpenCode: nobody's login until named.
+        engine.host().put_file(path.clone(), b);
+        assert!(matches!(
+            engine.live(ProviderId::OpenCode).unwrap(),
+            Live::Unmanaged { .. }
+        ));
+        engine.enroll(ProviderId::OpenCode, "b").unwrap();
+
+        engine.switch("a", Some(ProviderId::OpenCode)).unwrap();
+        assert_eq!(engine.host().file(&path).unwrap(), a.as_bytes());
+        assert_eq!(
+            engine.live(ProviderId::OpenCode).unwrap(),
+            Live::Account("a".into())
+        );
+        engine.switch("b", Some(ProviderId::OpenCode)).unwrap();
+        assert_eq!(engine.host().file(&path).unwrap(), b.as_bytes());
+
+        let api = FakeApi::new();
+        let all = engine.usage(&api).unwrap();
+        assert!(matches!(report_for(&all, "a"), UsageReport::Ok(u) if u.windows.is_empty()));
+        assert!(api.seen.lock().unwrap().is_empty());
     }
 
     #[test]
