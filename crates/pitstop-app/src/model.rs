@@ -54,6 +54,8 @@ pub struct Automation {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WarmRow {
+    /// The tool's id, as in `ToolView::id`.
+    pub provider: String,
     pub name: String,
     pub plan: Option<String>,
     pub on: bool,
@@ -341,12 +343,19 @@ pub fn build<H: Host>(engine: &Engine<H>, input: &Input) -> Snapshot {
     snapshot.automation.warm_up = snapshot
         .tools
         .iter()
-        .filter(|t| t.id == ProviderId::ClaudeCode.as_str())
-        .flat_map(|t| &t.accounts)
-        .map(|a| {
-            let on = input.settings.warm_up.contains(&a.name);
-            let judged = input.warm.iter().find(|w| w.name == a.name);
+        .filter_map(|t| {
+            let pid = ProviderId::parse(t.id).ok()?;
+            crate::app::WARM_TOOLS
+                .contains(&pid)
+                .then(move || t.accounts.iter().map(move |a| (pid, a)))
+        })
+        .flatten()
+        .map(|(pid, a)| {
+            let key = crate::warm::key(pid, &a.name);
+            let on = input.settings.warm_up.contains(&key);
+            let judged = input.warm.iter().find(|w| w.name == key);
             WarmRow {
+                provider: pid.as_str().to_owned(),
                 name: a.name.clone(),
                 plan: a.plan.clone(),
                 on,

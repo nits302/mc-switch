@@ -22,8 +22,9 @@ pub struct Settings {
     pub auto_switch_at: u8,
     /// Notify when the account in use runs out and another has room.
     pub notify_run_out: bool,
-    /// Claude Code accounts, by name, whose next five-hour period is started
-    /// as soon as the last one ends.
+    /// Accounts, by `warm::key` (a Claude Code account's bare name, a Codex
+    /// one's `codex:name`), whose next five-hour period is started as soon as
+    /// the last one ends.
     pub warm_up: Vec<String>,
     /// The span of the day warm-ups are made in, `HH:MM` local time; a span
     /// whose start is later than its end runs past midnight.

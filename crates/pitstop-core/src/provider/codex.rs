@@ -84,7 +84,7 @@ impl Provider for Codex {
 
 /// A JWT's payload claims, decoded and never verified: they label things,
 /// they decide nothing.
-pub(crate) fn jwt_claims(token: &str) -> Option<serde_json::Value> {
+pub fn jwt_claims(token: &str) -> Option<serde_json::Value> {
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine as _;
 
