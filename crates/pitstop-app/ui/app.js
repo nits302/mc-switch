@@ -806,11 +806,11 @@ function meterLine(grid, moves, { id, label, used, pace, resets, resetsHelp, hel
   }
 }
 
-/** The warm-up row Settings shows for a Claude Code account, when it is on. */
+/** The warm-up row Settings shows for an account, when it is on. */
 function warmOf(tool, account) {
   const a = snap && snap.automation;
-  if (tool.id !== "claude-code" || !a) return null;
-  const row = a.warmUp.find((r) => r.name === account.name);
+  if (!a) return null;
+  const row = a.warmUp.find((r) => r.provider === tool.id && r.name === account.name);
   return row && row.on ? row : null;
 }
 
@@ -1989,10 +1989,10 @@ function automationGroups() {
           h(
             "div",
             { class: "warm-account" },
-            h("div", { class: "row-title" }, h("span", { class: "setting-name", text: row.name }), row.plan ? h("span", { class: "tag", text: row.plan }) : null),
+            h("div", { class: "row-title" }, h("span", { class: "setting-name", text: row.name }), h("span", { class: "tag", text: (snap.tools.find((x) => x.id === row.provider) || {}).name || row.provider }), row.plan ? h("span", { class: "tag", text: row.plan }) : null),
             h("p", { class: "help", text: warmText(row) }),
           ),
-          toggle(row.on, t("warmFor", { name: row.name }), () => invoke("set_warm_up", { name: row.name, on: !row.on }).catch((error) => openAlert(t("couldntChange"), errorText(error))), `warm:${row.name}`),
+          toggle(row.on, t("warmFor", { name: row.name }), () => invoke("set_warm_up", { provider: row.provider, name: row.name, on: !row.on }).catch((error) => openAlert(t("couldntChange"), errorText(error))), `warm:${row.provider}:${row.name}`),
         ),
       )
     : [h("div", { class: "setting-row" }, h("p", { class: "help", text: t("warmNoAccounts") }))];

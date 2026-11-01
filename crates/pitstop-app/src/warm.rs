@@ -5,6 +5,11 @@
 //! Claude Code renews as it runs when its token has lapsed, and the renewed
 //! login goes back in the vault. What was tried is kept in
 //! `~/.mc-switch/warmed.json`.
+//!
+//! Codex works the same way through `codex exec`: the account in use runs in
+//! Codex's own home (Codex renews its login there itself, so no copy goes
+//! stale), a parked one in a private `CODEX_HOME` whose renewed `auth.json`
+//! goes back in the vault.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -15,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use pitstop_core::engine::vault_id;
 use pitstop_core::provider::claude_code::ClaudeCode;
+use pitstop_core::provider::codex::{jwt_claims, Codex};
 use pitstop_core::provider::provider_for;
 use pitstop_core::signin::{kill_tree, PrivateDir};
 use pitstop_core::{vault, Host, ProviderId};
@@ -65,6 +71,15 @@ impl Token {
     }
 }
 
+/// Where an account's warm-up setting and record are kept: Claude Code by its
+/// bare name (as before Codex had warm-ups), any other tool as `tool:name`.
+pub fn key(provider: ProviderId, name: &str) -> String {
+    match provider {
+        ProviderId::ClaudeCode => name.to_owned(),
+        other => format!("{}:{name}", other.as_str()),
+    }
+}
+
 /// The token in a Claude Code login: a vault blob, whose `credentials` hold
 /// the `claudeAiOauth` Claude Code keeps on disk or in the keychain.
 pub fn token_of(blob: &[u8]) -> Option<Token> {
@@ -87,18 +102,36 @@ pub fn token_of(blob: &[u8]) -> Option<Token> {
     })
 }
 
-/// The token of `name`: the login Claude Code holds when it is the account in
-/// use, its parked copy otherwise.
-pub fn token_for(host: &dyn Host, name: &str, in_use: bool) -> Option<Token> {
+/// The token in a Codex login: `auth.json`, whose access token lapses at its
+/// JWT's `exp` and is renewed with `tokens.refresh_token`.
+pub fn codex_token_of(blob: &[u8]) -> Option<Token> {
+    let auth: Value = serde_json::from_slice(blob).ok()?;
+    let tokens = auth.get("tokens")?;
+    let access = tokens.get("access_token")?.as_str()?.to_owned();
+    let expires_at = jwt_claims(&access).and_then(|c| c.get("exp")?.as_i64());
+    let renewable = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .is_some_and(|r| !r.is_empty());
+    Some(Token {
+        access,
+        expires_at,
+        renewable,
+    })
+}
+
+/// The token of `provider`'s account `name`: the login the tool holds when it
+/// is the account in use, its parked copy otherwise.
+pub fn token_for(host: &dyn Host, provider: ProviderId, name: &str, in_use: bool) -> Option<Token> {
     let blob = if in_use {
-        provider_for(ProviderId::ClaudeCode)
-            .read_active(host)
-            .ok()??
-            .blob
+        provider_for(provider).read_active(host).ok()??.blob
     } else {
-        vault::load(host, &vault_id(ProviderId::ClaudeCode, name)).ok()?
+        vault::load(host, &vault_id(provider, name)).ok()?
     };
-    token_of(&blob)
+    match provider {
+        ProviderId::Codex => codex_token_of(&blob),
+        _ => token_of(&blob),
+    }
 }
 
 /// Print mode on the smallest model, with no tools, MCP servers, slash
@@ -148,6 +181,101 @@ pub fn command(program: &Path, dir: &Path, token: Option<&str>, search: &[PathBu
         cmd.process_group(0);
     }
     cmd
+}
+
+/// `codex exec` answering one short prompt in `codex_home`, read-only, with no
+/// user config (MCP servers, profiles), no git check, no kept session, events
+/// as JSON lines. The model is Codex's default: naming one could name one the
+/// account's plan does not have.
+pub fn codex_command(program: &Path, codex_home: &Path, search: &[PathBuf]) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args([
+        "exec",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--sandbox",
+        "read-only",
+        "--json",
+        PROMPT,
+    ])
+    .current_dir(codex_home)
+    .env("CODEX_HOME", codex_home)
+    .env_remove("OPENAI_API_KEY")
+    .env_remove("CODEX_API_KEY")
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    if let Ok(path) = std::env::join_paths(search) {
+        cmd.env("PATH", path);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd
+}
+
+/// What `codex exec --json` came to: a clean exit after `turn.completed` is a
+/// warm-up; otherwise the words of its `turn.failed` or `error` event decide.
+pub fn codex_verdict(exit: Option<i32>, stdout: &str) -> Result<(), Failure> {
+    let events: Vec<Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .collect();
+    let kind = |e: &Value| e.get("type").and_then(Value::as_str).map(str::to_owned);
+    if exit == Some(0)
+        && events
+            .iter()
+            .any(|e| kind(e).as_deref() == Some("turn.completed"))
+    {
+        return Ok(());
+    }
+    let said = events
+        .iter()
+        .rev()
+        .find_map(|e| match kind(e).as_deref() {
+            Some("turn.failed") => e.pointer("/error/message")?.as_str(),
+            Some("error") => e.get("message")?.as_str(),
+            _ => None,
+        })
+        .unwrap_or("Codex failed")
+        .to_owned();
+    let lower = said.to_lowercase();
+    let has = |signs: &[&str]| signs.iter().any(|s| lower.contains(s));
+    if has(&["usage limit", "usage_limit"]) {
+        Err(Failure::LimitReached)
+    } else if has(&[
+        "401",
+        "403",
+        "unauthorized",
+        "forbidden",
+        "refresh token",
+        "log in again",
+        "sign in again",
+    ]) {
+        Err(Failure::LoginRefused)
+    } else if has(&[
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "stream disconnected",
+        "overloaded",
+    ]) || never_answered(&said)
+    {
+        Err(Failure::Unreachable)
+    } else {
+        Err(Failure::Failed(said))
+    }
 }
 
 /// What print mode's JSON result came to: `is_error` false and a clean exit
@@ -213,7 +341,48 @@ fn new_dir() -> Result<PrivateDir, Failure> {
 /// Run one warm-up with `token`, in a directory made for it and removed after.
 pub fn run(program: &Path, token: &str, search: &[PathBuf]) -> Result<(), Failure> {
     let dir = new_dir()?;
-    run_in(program, dir.path(), Some(token), search)
+    run_in(command(program, dir.path(), Some(token), search), verdict)
+}
+
+/// Run one Codex warm-up of the account in use, in Codex's own home: it renews
+/// that login in place, as it would for the user. The caller keeps switches
+/// out while this runs, so a renewal never lands on a login switched in.
+pub fn run_codex(host: &dyn Host, program: &Path, search: &[PathBuf]) -> Result<(), Failure> {
+    let auth = Codex::auth_path(host);
+    let home = auth
+        .parent()
+        .ok_or_else(|| Failure::Failed("no Codex home".into()))?;
+    run_in(codex_command(program, home, search), codex_verdict)
+}
+
+/// Run one Codex warm-up of the parked account `name`, its `auth.json` copied
+/// into a private `CODEX_HOME`; one Codex renewed meanwhile goes back in the
+/// vault, whatever the warm-up came to. The caller keeps switches out.
+pub fn run_codex_parked(
+    host: &dyn Host,
+    name: &str,
+    program: &Path,
+    search: &[PathBuf],
+) -> Result<(), Failure> {
+    let id = vault_id(ProviderId::Codex, name);
+    let blob = vault::load(host, &id).map_err(|e| Failure::Failed(e.to_string()))?;
+    let dir = PrivateDir::create_for(ProviderId::Codex, "warm")
+        .map_err(|e| Failure::Failed(e.to_string()))?;
+    let auth = dir.path().join("auth.json");
+    let mut outcome = host
+        .write_atomic(&auth, &blob)
+        .map_err(|e| Failure::Failed(e.to_string()))
+        .and_then(|()| run_in(codex_command(program, dir.path(), search), codex_verdict));
+    if let Ok(Some(renewed)) = host.read(&auth) {
+        if renewed != blob {
+            if let Err(e) = vault::store(host, &id, &renewed) {
+                outcome = Err(Failure::Failed(format!(
+                    "couldn't keep the renewed login: {e}"
+                )));
+            }
+        }
+    }
+    outcome
 }
 
 /// Run one warm-up of the parked account `name` with its whole login, lent to
@@ -233,7 +402,7 @@ pub fn run_parked(
     let mut outcome = claude
         .lend(host, dir.path(), &blob)
         .map_err(|e| Failure::Failed(e.to_string()))
-        .and_then(|()| run_in(program, dir.path(), None, search));
+        .and_then(|()| run_in(command(program, dir.path(), None, search), verdict));
     if let Ok(Some(renewed)) = claude.renewed(host, dir.path(), &blob) {
         if let Err(e) = vault::store(host, &id, &renewed) {
             outcome = Err(Failure::Failed(format!(
@@ -245,14 +414,13 @@ pub fn run_parked(
 }
 
 fn run_in(
-    program: &Path,
-    dir: &Path,
-    token: Option<&str>,
-    search: &[PathBuf],
+    mut cmd: Command,
+    verdict: fn(Option<i32>, &str) -> Result<(), Failure>,
 ) -> Result<(), Failure> {
-    let mut child = command(program, dir, token, search)
+    let program = cmd.get_program().to_string_lossy().into_owned();
+    let mut child = cmd
         .spawn()
-        .map_err(|e| Failure::Failed(format!("couldn't start Claude Code: {e}")))?;
+        .map_err(|e| Failure::Failed(format!("couldn't start {program}: {e}")))?;
     let mut stdout = child.stdout.take();
     let (said_tx, said_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
@@ -420,8 +588,8 @@ pub fn forget(host: &dyn Host, name: &str) {
     }
 }
 
-/// What a Claude Code account's rename carries: its warm-up setting and its
-/// record both move to the new name.
+/// What an account's rename carries: its warm-up setting and its record both
+/// move to the new key (see [`key`]).
 pub fn follow_rename(host: &dyn Host, old: &str, new: &str) {
     let mut saved = crate::settings::load(host);
     saved.rename_account(old, new);
@@ -429,7 +597,7 @@ pub fn follow_rename(host: &dyn Host, old: &str, new: &str) {
     rename(host, old, new);
 }
 
-/// What forgetting a Claude Code account takes with it.
+/// What forgetting an account takes with it, by its [`key`].
 pub fn follow_forget(host: &dyn Host, name: &str) {
     let mut saved = crate::settings::load(host);
     saved.forget_account(name);
@@ -488,6 +656,85 @@ mod tests {
             .find(|(key, _)| *key == OsStr::new("CLAUDE_CODE_OAUTH_TOKEN"))
             .map(|(_, v)| v);
         assert_eq!(token, Some(None));
+    }
+
+    #[test]
+    fn claude_keeps_bare_names_and_other_tools_are_prefixed() {
+        assert_eq!(key(ProviderId::ClaudeCode, "work"), "work");
+        assert_eq!(key(ProviderId::Codex, "work"), "codex:work");
+    }
+
+    #[test]
+    fn the_codex_command_runs_exec_in_the_given_home_without_api_keys() {
+        let cmd = codex_command(Path::new("codex"), Path::new("/tmp/c"), &[]);
+        let args: Vec<_> = cmd.get_args().collect();
+        assert_eq!(args[0], OsStr::new("exec"));
+        for flag in [
+            "--ephemeral",
+            "--ignore-user-config",
+            "--json",
+            "--skip-git-repo-check",
+        ] {
+            assert!(args.contains(&OsStr::new(flag)), "{flag}");
+        }
+        assert_eq!(args.last(), Some(&OsStr::new(PROMPT)));
+        let env: Vec<_> = cmd.get_envs().collect();
+        let value = |k: &str| {
+            env.iter()
+                .find(|(key, _)| *key == OsStr::new(k))
+                .map(|(_, v)| *v)
+        };
+        assert_eq!(value("CODEX_HOME"), Some(Some(OsStr::new("/tmp/c"))));
+        assert_eq!(value("OPENAI_API_KEY"), Some(None));
+    }
+
+    #[test]
+    fn each_codex_outcome_is_read_as_what_it_came_to() {
+        let done = "{\"type\":\"thread.started\"}\n{\"type\":\"turn.completed\",\"usage\":{}}\n";
+        let failed =
+            |msg: &str| format!("{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"{msg}\"}}}}");
+        assert_eq!(codex_verdict(Some(0), done), Ok(()));
+        assert_eq!(
+            codex_verdict(Some(1), done),
+            Err(Failure::Failed("Codex failed".into()))
+        );
+        assert_eq!(
+            codex_verdict(
+                Some(1),
+                &failed("You've hit your usage limit. Try again later.")
+            ),
+            Err(Failure::LimitReached)
+        );
+        assert_eq!(
+            codex_verdict(Some(1), &failed("unexpected status 401 Unauthorized")),
+            Err(Failure::LoginRefused)
+        );
+        assert_eq!(
+            codex_verdict(Some(1), &failed("stream disconnected before completion")),
+            Err(Failure::Unreachable)
+        );
+        assert_eq!(
+            codex_verdict(Some(1), "{\"type\":\"error\",\"message\":\"odd\"}"),
+            Err(Failure::Failed("odd".into()))
+        );
+        assert_eq!(
+            codex_verdict(Some(1), ""),
+            Err(Failure::Failed("Codex failed".into()))
+        );
+    }
+
+    #[test]
+    fn a_codex_token_lapses_at_its_jwt_exp_and_renews_with_its_refresh_token() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1000}"#);
+        let blob =
+            format!(r#"{{"tokens":{{"access_token":"h.{payload}.s","refresh_token":"r"}}}}"#);
+        let token = codex_token_of(blob.as_bytes()).unwrap();
+        assert_eq!(token.expires_at, Some(1000));
+        assert!(token.renewable);
+        assert!(token.lapsed(1000));
+        assert!(codex_token_of(br#"{"OPENAI_API_KEY":"k"}"#).is_none());
     }
 
     #[test]

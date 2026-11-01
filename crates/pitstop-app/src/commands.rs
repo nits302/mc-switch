@@ -256,8 +256,12 @@ pub async fn rename_account(
             // The usage read under the old name belongs to the new one, and so
             // do its warm-up setting and record.
             app::rename_usage(&app, pid, &name, &account.name);
-            if pid == ProviderId::ClaudeCode {
-                crate::warm::follow_rename(&app::host(), &name, &account.name);
+            if app::WARM_TOOLS.contains(&pid) {
+                crate::warm::follow_rename(
+                    &app::host(),
+                    &crate::warm::key(pid, &name),
+                    &crate::warm::key(pid, &account.name),
+                );
             }
         }
         app::refresh(&app);
@@ -277,8 +281,8 @@ pub async fn forget_account(app: AppHandle, provider: String, name: String) -> A
             let _op = state.ops.lock();
             app::engine().remove(&name, Some(pid))
         };
-        if removed.is_ok() && pid == ProviderId::ClaudeCode {
-            crate::warm::follow_forget(&app::host(), &name);
+        if removed.is_ok() && app::WARM_TOOLS.contains(&pid) {
+            crate::warm::follow_forget(&app::host(), &crate::warm::key(pid, &name));
         }
         app::refresh(&app);
         removed
@@ -439,15 +443,23 @@ pub async fn set_automation(
     .await
 }
 
-/// Turn warm-ups on or off for one Claude Code account.
+/// Turn warm-ups on or off for one Claude Code or Codex account.
 #[tauri::command]
-pub async fn set_warm_up(app: AppHandle, name: String, on: bool) -> Answer<()> {
+pub async fn set_warm_up(app: AppHandle, provider: String, name: String, on: bool) -> Answer<()> {
+    let pid = self::provider(&provider)?;
+    if !app::WARM_TOOLS.contains(&pid) {
+        return Err(UiError::new(
+            "unsupported",
+            format!("{provider} has no warm-up"),
+        ));
+    }
+    let key = crate::warm::key(pid, &name);
     blocking(move || {
         let host = app::host();
         let mut saved = settings::load(&host);
-        saved.warm_up.retain(|n| n != &name);
+        saved.warm_up.retain(|n| n != &key);
         if on {
-            saved.warm_up.push(name);
+            saved.warm_up.push(key);
         }
         settings::save(&host, &saved).map_err(|e| UiError::from(&e))?;
         app::refresh(&app);

@@ -290,14 +290,18 @@ fn end_round(app: &AppHandle, finished: bool) {
 /// Whether `name`'s login is lent to a warm-up right now: a switch to it
 /// would put in use a login being renewed.
 pub fn warming(app: &AppHandle, provider: ProviderId, name: &str) -> bool {
-    provider == ProviderId::ClaudeCode
+    let key = warm::key(provider, name);
+    WARM_TOOLS.contains(&provider)
         && app.state::<AppState>().inner.lock().is_ok_and(|inner| {
             inner
                 .warm
                 .iter()
-                .any(|w| w.name == name && w.standing == WarmStanding::Warming)
+                .any(|w| w.name == key && w.standing == WarmStanding::Warming)
         })
 }
+
+/// The tools whose accounts can be warmed up.
+pub const WARM_TOOLS: [ProviderId; 2] = [ProviderId::ClaudeCode, ProviderId::Codex];
 
 fn duties(app: &AppHandle) {
     let Some(snapshot) = snapshot(app) else {
@@ -340,8 +344,22 @@ fn duties(app: &AppHandle) {
             );
         }
     }
-    if let Some(tool) = claude {
-        warm_ups(app, &host, &settings, tool);
+    let mut judged = Vec::new();
+    let mut started_any = false;
+    for provider in WARM_TOOLS {
+        if let Some(tool) = snapshot.tools.iter().find(|t| t.id == provider.as_str()) {
+            started_any |= warm_ups(app, &host, &settings, provider, tool, &mut judged);
+        }
+    }
+    {
+        let state = app.state::<AppState>();
+        if let Ok(mut inner) = state.inner.lock() {
+            inner.warm = judged;
+        };
+    }
+    refresh(app);
+    if started_any {
+        read_usage(app);
     }
 }
 
@@ -413,54 +431,52 @@ fn show_warm(app: &AppHandle, judged: WarmState) {
     refresh(app);
 }
 
+/// Warm up `provider`'s due accounts, adding where each stands to `judged`;
+/// `true` when any warm-up may have started a period or renewed a login.
 fn warm_ups(
     app: &AppHandle,
     host: &RealHost,
     settings: &settings::Settings,
+    provider: ProviderId,
     tool: &model::ToolView,
-) {
+    judged: &mut Vec<WarmState>,
+) -> bool {
     let (today, minute) = local_day();
     let in_span = duty::in_span(minute, &settings.warm_from, &settings.warm_to);
     let mut ledger = warm::load(host, &today);
     // Found only when an account is due: on macOS a look starts a login shell.
     let mut tools: Option<(Option<std::path::PathBuf>, Vec<std::path::PathBuf>)> = None;
-    let mut judged = Vec::new();
     let mut started_any = false;
     for account in &tool.accounts {
-        if !settings.warm_up.contains(&account.name) {
+        let key = warm::key(provider, &account.name);
+        if !settings.warm_up.contains(&key) {
             continue;
         }
         // Asked again, not taken from the snapshot: an automatic switch this
         // round, or the user, may have changed the login in use since. The
         // live login decides, as in the window; the record only when the
         // login can't be read.
-        let in_use = match engine().live(ProviderId::ClaudeCode) {
-            Ok(Live::Account(name)) => name == account.name,
-            Ok(_) => false,
-            Err(_) => engine().state().is_ok_and(|s| {
-                s.active.get(ProviderId::ClaudeCode.as_str()) == Some(&account.name)
-            }),
-        };
+        let in_use = is_in_use(provider, &account.name);
         let account = &model::AccountView {
             in_use,
             ..account.clone()
         };
-        let token = warm::token_for(host, &account.name, in_use);
+        let token = warm::token_for(host, provider, &account.name, in_use);
         let at = now();
-        // The account in use lends its token as it is; a parked one lends its
-        // whole login, which the warm-up renews when it can.
+        // Claude Code's account in use lends its token as it is; any other
+        // login is lent whole (or used where it is), and renewed when it can.
         let expired = match &token {
             None => true,
-            Some(t) if in_use => t.lapsed(at),
+            Some(t) if in_use && provider == ProviderId::ClaudeCode => t.lapsed(at),
             Some(t) => t.lapsed(at) && !t.renewable,
         };
-        let warmed = ledger.get(&account.name).cloned().unwrap_or_default();
+        let warmed = ledger.get(&key).cloned().unwrap_or_default();
         let mut standing = duty::warm_standing(account, &warmed, expired, in_span, at);
         if standing == WarmStanding::Due {
             let (program, search) = tools.get_or_insert_with(|| {
                 let home = real_home();
                 (
-                    signin::find_program(ProviderId::ClaudeCode, &home),
+                    signin::find_program(provider, &home),
                     signin::search_path(&home),
                 )
             });
@@ -468,26 +484,30 @@ fn warm_ups(
                 show_warm(
                     app,
                     WarmState {
-                        name: account.name.clone(),
+                        name: key.clone(),
                         standing: WarmStanding::Warming,
                         warmed_at: warmed.started,
                     },
                 );
-                let outcome = if in_use {
+                let outcome = if in_use && provider == ProviderId::ClaudeCode {
                     Some(warm::run(program, &token.access, search))
                 } else {
-                    // No switch while the parked login is lent out: one to
-                    // this account would put in use a login being renewed.
+                    // No switch while a login is lent out or renewed in place:
+                    // one would put in use (or overwrite) a login being renewed.
                     let state = app.state::<AppState>();
                     let _op = state.ops.lock();
-                    let still_parked = engine().state().is_ok_and(|s| {
-                        s.active.get(ProviderId::ClaudeCode.as_str()) != Some(&account.name)
-                    });
-                    still_parked.then(|| warm::run_parked(host, &account.name, program, search))
+                    let unchanged = is_in_use(provider, &account.name) == in_use;
+                    unchanged.then(|| match (provider, in_use) {
+                        (ProviderId::Codex, true) => warm::run_codex(host, program, search),
+                        (ProviderId::Codex, false) => {
+                            warm::run_codex_parked(host, &account.name, program, search)
+                        }
+                        _ => warm::run_parked(host, &account.name, program, search),
+                    })
                 };
                 let Some(outcome) = outcome else {
                     let unchanged = WarmState {
-                        name: account.name.clone(),
+                        name: key.clone(),
                         standing,
                         warmed_at: warmed.started,
                     };
@@ -498,27 +518,21 @@ fn warm_ups(
                 // A parked login may be renewed even when the warm-up failed.
                 started_any |= outcome.is_ok() || !in_use;
                 let name = account.name.clone();
-                let warmed = warm::update_if(
-                    host,
-                    &account.name,
-                    &today,
-                    now(),
-                    outcome.as_ref().copied(),
-                    || {
+                let warmed =
+                    warm::update_if(host, &key, &today, now(), outcome.as_ref().copied(), || {
                         engine().state().is_ok_and(|state| {
                             state
                                 .accounts
                                 .iter()
-                                .any(|a| a.provider == ProviderId::ClaudeCode && a.name == name)
+                                .any(|a| a.provider == provider && a.name == name)
                         })
-                    },
-                );
-                ledger.insert(account.name.clone(), warmed.clone());
+                    });
+                ledger.insert(key.clone(), warmed.clone());
                 standing = duty::warm_standing(account, &warmed, expired, in_span, now());
                 show_warm(
                     app,
                     WarmState {
-                        name: account.name.clone(),
+                        name: key.clone(),
                         standing: standing.clone(),
                         warmed_at: warmed.started,
                     },
@@ -526,20 +540,24 @@ fn warm_ups(
             }
         }
         judged.push(WarmState {
-            name: account.name.clone(),
+            name: key.clone(),
             standing,
-            warmed_at: ledger.get(&account.name).and_then(|w| w.started),
+            warmed_at: ledger.get(&key).and_then(|w| w.started),
         });
     }
-    {
-        let state = app.state::<AppState>();
-        if let Ok(mut inner) = state.inner.lock() {
-            inner.warm = judged;
-        };
-    }
-    refresh(app);
-    if started_any {
-        read_usage(app);
+    started_any
+}
+
+/// Whether `name` is `provider`'s account in use, asked again rather than
+/// taken from the snapshot: the live login decides, as in the window; the
+/// record only when the login can't be read.
+fn is_in_use(provider: ProviderId, name: &str) -> bool {
+    match engine().live(provider) {
+        Ok(Live::Account(live)) => live == name,
+        Ok(_) => false,
+        Err(_) => engine()
+            .state()
+            .is_ok_and(|s| s.active.get(provider.as_str()).is_some_and(|n| n == name)),
     }
 }
 
