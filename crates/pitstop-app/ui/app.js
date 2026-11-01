@@ -1440,7 +1440,21 @@ const DIALOGS = {
     const nameBroken = d.name.trim() !== "" && !nameOk;
     // With one tool to add to there is nothing to choose: the title names it.
     const choice = offered.filter((x) => !missing.includes(x)).length > 1;
-    d.submit = () => !chosenMissing && startSignIn();
+    // OpenCode signs in through its own picker: its add saves the login it holds.
+    const saveLive = async () => {
+      d.busy = true;
+      renderDialog();
+      try {
+        await invoke("name_account", { provider: d.provider, name: d.name.trim() });
+        closeDialog();
+      } catch (error) {
+        d.busy = false;
+        d.error = error;
+        renderDialog();
+      }
+    };
+    const byLive = d.provider === "opencode" && !d.again;
+    d.submit = () => !chosenMissing && (byLive ? saveLive() : startSignIn());
     // A click moves on to the name, as typing it is what comes next; arrow
     // keys stay on the choice.
     const choose = (id, byKey) => {
@@ -1460,7 +1474,7 @@ const DIALOGS = {
         d.again ? t("signInAgainTitle", { name: d.name }) : choice ? t("addTitle") : t("addTitleFor", { tool: toolName }),
         d.again
           ? t(d.provider === "antigravity" ? "signInAgainAntigravity" : "signInAgainMessage", { email: d.email || d.name })
-          : t({ cursor: "addMessageCursor", antigravity: "addMessageAntigravity" }[d.provider] || "addMessage"),
+          : t({ cursor: "addMessageCursor", antigravity: "addMessageAntigravity", opencode: "addMessageOpenCode" }[d.provider] || "addMessage"),
       ),
       h(
         "div",
@@ -1485,15 +1499,15 @@ const DIALOGS = {
             ],
         missing.map((x) =>
           // Antigravity counts only as its editor: say so, since the Antigravity 2 app may be there.
-          h("p", { class: "footnote", text: x.id === "antigravity" ? t("appMissingAntigravity") : isEditor(x.id) ? t("appMissing", { tool: x.name }) : t("toolMissing", { tool: x.name, program: x.id === "codex" ? "codex" : "claude" }) }),
+          h("p", { class: "footnote", text: x.id === "antigravity" ? t("appMissingAntigravity") : isEditor(x.id) ? t("appMissing", { tool: x.name }) : t("toolMissing", { tool: x.name, program: { codex: "codex", opencode: "opencode" }[x.id] || "claude" }) }),
         ),
-        d.again ? null : h("p", { class: "footnote", text: isEditor(d.provider) ? t("addWarningEditor", { tool: toolName }) : t("addWarning") }),
+        d.again || byLive ? null : h("p", { class: "footnote", text: isEditor(d.provider) ? t("addWarningEditor", { tool: toolName }) : t("addWarning") }),
       ),
       failureBox(d.again ? t("couldntSignIn", { name: d.name }) : t("couldntAdd", { name: d.name.trim() }), d.error),
       buttons(
         h("span", { class: "spacer" }),
         keyed(button(t("cancel"), closeDialog), "cancel"),
-        keyed(h("button", { class: "button primary", disabled: !nameOk || chosenMissing, onclick: startSignIn }, t("signIn")), "primary"),
+        keyed(h("button", { class: "button primary", disabled: !nameOk || chosenMissing || d.busy, onclick: d.submit }, t(byLive ? "save" : "signIn")), "primary"),
       ),
     ];
   },
