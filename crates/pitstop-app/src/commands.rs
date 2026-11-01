@@ -366,6 +366,62 @@ pub async fn set_theme(app: AppHandle, theme: Option<String>) -> Answer<()> {
     .await
 }
 
+/// Put a shortcut to this app on the desktop (a `.lnk` on Windows, a Finder
+/// alias of the `.app` on macOS). Paths go in through the environment, never
+/// into the script text.
+#[tauri::command]
+pub async fn create_desktop_shortcut() -> Answer<()> {
+    blocking(|| {
+        let fail = |e: String| UiError::new("shortcut", e);
+        let exe = std::env::current_exe().map_err(|e| fail(e.to_string()))?;
+        #[cfg(windows)]
+        let mut cmd = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut cmd = std::process::Command::new("powershell");
+            cmd.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$d = [Environment]::GetFolderPath('Desktop'); \
+                 $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $d 'MC Switch.lnk')); \
+                 $s.TargetPath = $env:MC_SWITCH_EXE; \
+                 $s.WorkingDirectory = Split-Path $env:MC_SWITCH_EXE; \
+                 $s.Save()",
+            ])
+            .env("MC_SWITCH_EXE", &exe)
+            .creation_flags(CREATE_NO_WINDOW);
+            cmd
+        };
+        #[cfg(target_os = "macos")]
+        let mut cmd = {
+            let bundle = exe
+                .ancestors()
+                .find(|p| p.extension().is_some_and(|e| e == "app"))
+                .ok_or_else(|| fail("MC Switch is not running from an .app bundle".into()))?;
+            let mut cmd = std::process::Command::new("osascript");
+            cmd.args([
+                "-e",
+                "tell application \"Finder\" to make alias file to (POSIX file (system attribute \"MC_SWITCH_APP\")) at desktop",
+            ])
+            .env("MC_SWITCH_APP", bundle);
+            cmd
+        };
+        #[cfg(not(any(windows, target_os = "macos")))]
+        return Err(fail(format!("not supported here ({})", exe.display())));
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            let out = cmd.output().map_err(|e| fail(e.to_string()))?;
+            if out.status.success() {
+                Ok(())
+            } else {
+                Err(fail(String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+            }
+        }
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn set_autostart(app: AppHandle, on: bool) -> Answer<()> {
     blocking(move || {

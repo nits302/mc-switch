@@ -1843,6 +1843,25 @@ function renderSettings() {
           h("div", null, h("div", { class: "setting-name", text: t("openAtLogin") }), h("p", { class: "help", text: t("openAtLoginHelp") })),
           keyed(autostart, "autostart"),
         ),
+        h(
+          "div",
+          { class: "setting-row" },
+          h("div", null, h("div", { class: "setting-name", text: t("desktopShortcut") }), h("p", { class: "help", text: t("desktopShortcutHelp") })),
+          keyed(
+            h(
+              "button",
+              {
+                class: "button compact",
+                onclick: () =>
+                  invoke("create_desktop_shortcut")
+                    .then(() => openAlert(t("shortcutCreated"), ""))
+                    .catch((error) => openAlert(t("couldntChange"), errorText(error))),
+              },
+              t("createShortcut"),
+            ),
+            "shortcut",
+          ),
+        ),
       ),
     ),
     automationGroups(),
