@@ -50,6 +50,7 @@ fn main() {
             commands::set_language,
             commands::set_theme,
             commands::set_autostart,
+            commands::create_desktop_shortcut,
             commands::dismiss_tip,
             commands::set_automation,
             commands::set_warm_up,
