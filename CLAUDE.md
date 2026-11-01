@@ -43,7 +43,7 @@ Three crates: `pitstop-core` (all logic) ← `pitstop-cli` and `pitstop-app` (Ta
 
 ## Conventions
 
-- Conventional Commits (`feat(app): …`, `fix(core): …`); user-visible changes need a line in `CHANGELOG.md`.
-- Release: bump `version` in the root `Cargo.toml` (app takes its version from there), date the CHANGELOG section, push tag `vX.Y.Z`. There is deliberately no auto-updater.
+- Conventional Commits (`feat(app): …`, `fix(core): …`).
+- Release: bump `version` in the root `Cargo.toml` (app takes its version from there), push tag `vX.Y.Z`. There is deliberately no auto-updater.
 - Never log or paste tokens, credential files, or anything from `~/.mc-switch/vault/`.
-- Unix-only permission tests exist; macOS-specific behavior (Keychain item `Claude Code-credentials`) is checked via the checklist in `CONTRIBUTING.md`.
+- Unix-only permission tests exist; macOS-specific behavior (Keychain item `Claude Code-credentials`) needs a manual check on a Mac.

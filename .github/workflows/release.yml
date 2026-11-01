@@ -105,16 +105,9 @@ jobs:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: Release notes from CHANGELOG.md
+      - name: Release notes
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '
-            $0 ~ "^## \\[" v "\\]" { found = 1; next }
-            found && /^## \[/ { exit }
-            found { print }
-          ' CHANGELOG.md > changes.md
-          cp changes.md notes.md
-          cat >> notes.md <<'EOF'
+          cat > notes.md <<'EOF'
 
           ## Download
 

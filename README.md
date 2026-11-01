@@ -55,7 +55,7 @@ On macOS: `crates/pitstop-app/macos/bundle.sh target/release/pitstop-app` wraps 
 into `MC Switch.app`.
 
 Set `MC_SWITCH_HOME=/some/dir` to run the app against a sandbox home instead of your
-real accounts (the command line has `--home`). See [CONTRIBUTING.md](CONTRIBUTING.md).
+real accounts (the command line has `--home`).
 
 ## Command line
 
