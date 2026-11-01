@@ -1,0 +1,197 @@
+//! The tray / menu bar item and its native menu, rebuilt from each snapshot.
+
+use tauri::image::Image;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Wry};
+
+use crate::app;
+use crate::i18n::Lang;
+use crate::links;
+use crate::model::{self, MenuLine, Snapshot};
+use crate::settings;
+
+const TRAY_ID: &str = "mc-switch";
+
+/// macOS colors a template image itself; Windows shows the orange mark.
+fn icon() -> Image<'static> {
+    let bytes: &[u8] = if cfg!(target_os = "macos") {
+        include_bytes!("../icons/tray/tray-template.png")
+    } else {
+        include_bytes!("../icons/tray/tray.png")
+    };
+    Image::from_bytes(bytes).expect("the tray icon is a valid PNG")
+}
+
+pub fn create(app: &AppHandle) -> tauri::Result<()> {
+    let menu = Menu::new(app)?;
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(icon())
+        .icon_as_template(cfg!(target_os = "macos"))
+        .tooltip("MC Switch")
+        .menu(&menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| chosen(app, event.id().as_ref()))
+        .build(app)?;
+    Ok(())
+}
+
+/// The local time of day for "Updated 23:58".
+fn clock(at: i64) -> String {
+    use chrono::{Local, TimeZone};
+    Local
+        .timestamp_opt(at, 0)
+        .single()
+        .map(|t| t.format("%H:%M").to_string())
+        .unwrap_or_default()
+}
+
+pub fn update(app: &AppHandle, snapshot: &Snapshot, lang: Lang) {
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let lines = model::menu(snapshot, lang, &clock);
+    if let Ok(menu) = build(app, &lines) {
+        // The author's links go just above the last separator and Quit.
+        let at = lines.len().saturating_sub(2);
+        if let Ok(author) = author_menu(app, lang) {
+            let _ = menu.insert(&author, at);
+        }
+        let _ = tray.set_menu(Some(menu));
+    }
+    let title = model::tray_title(snapshot);
+    #[cfg(target_os = "macos")]
+    let _ = tray.set_title(title.as_deref());
+    let _ = tray.set_tooltip(Some(match &title {
+        Some(title) => format!("MC Switch — {title}"),
+        None => "MC Switch".to_owned(),
+    }));
+}
+
+fn build(app: &AppHandle, lines: &[MenuLine]) -> tauri::Result<Menu<Wry>> {
+    let menu = Menu::new(app)?;
+    for (n, line) in lines.iter().enumerate() {
+        match line {
+            MenuLine::Heading(text) => menu.append(&MenuItem::with_id(
+                app,
+                format!("text|{n}"),
+                text,
+                false,
+                None::<&str>,
+            )?)?,
+            MenuLine::Account { id, title, checked } => menu.append(&CheckMenuItem::with_id(
+                app,
+                id.as_str(),
+                title,
+                true,
+                *checked,
+                None::<&str>,
+            )?)?,
+            MenuLine::Note(text) => menu.append(&MenuItem::with_id(
+                app,
+                format!("text|{n}"),
+                format!("    {text}"),
+                false,
+                None::<&str>,
+            )?)?,
+            MenuLine::Action { id, title, enabled } => menu.append(&MenuItem::with_id(
+                app,
+                id.as_str(),
+                title,
+                *enabled,
+                None::<&str>,
+            )?)?,
+            MenuLine::Separator => menu.append(&PredefinedMenuItem::separator(app)?)?,
+        }
+    }
+    Ok(menu)
+}
+
+fn author_menu(app: &AppHandle, lang: Lang) -> tauri::Result<Submenu<Wry>> {
+    let menu = Submenu::new(app, lang.made_by(links::AUTHOR), true)?;
+    for (name, _) in links::LINKS {
+        menu.append(&MenuItem::with_id(
+            app,
+            format!("link|{name}"),
+            lang.link(name),
+            true,
+            None::<&str>,
+        )?)?;
+    }
+    Ok(menu)
+}
+
+/// Runs on the UI thread: anything slower than showing a window goes to a
+/// thread of its own.
+fn chosen(app: &AppHandle, id: &str) {
+    let parts: Vec<&str> = id.split('|').collect();
+    let owned = app.clone();
+    match parts.as_slice() {
+        ["use" | "suggest", provider, name] => switch(app, provider, name),
+        ["name", provider] => app::open_dialog(app, "name", Some(provider), None),
+        ["add"] => app::open_dialog(app, "add", None, None),
+        ["refresh"] => {
+            std::thread::spawn(move || app::read_usage(&owned));
+        }
+        ["open"] => app::show_window(app),
+        ["link", name] => {
+            if let Err(error) = links::open(app, name) {
+                link_failed(app, name, &error.message);
+            }
+            return;
+        }
+        ["quit"] => {
+            std::thread::spawn(move || app::quit(&owned));
+            return;
+        }
+        _ => {}
+    }
+    // A check item toggles itself when chosen; put the menu back as it is.
+    let app = app.clone();
+    std::thread::spawn(move || app::refresh(&app));
+}
+
+/// The tray has no window to show an alert in, so a link that would not
+/// open is told in a notification, with the address to open by hand.
+fn link_failed(app: &AppHandle, name: &str, error: &str) {
+    let lang = Lang::resolve(settings::load(&app::host()).language.as_deref());
+    let url = links::url(name).unwrap_or(name);
+    app::notify(app, lang.couldnt_open(), &format!("{url}\n{error}"));
+}
+
+/// Switch from the menu. Whether the tool holds a login Pitstop does not
+/// manage is decided by the switch itself, on the login it reads; if so, the
+/// question goes to the window instead, and so does a failure.
+fn switch(app: &AppHandle, provider: &str, name: &str) {
+    let Ok(pid) = pitstop_core::ProviderId::parse(provider) else {
+        return;
+    };
+    let app = app.clone();
+    let name = name.to_owned();
+    std::thread::spawn(
+        move || match crate::commands::switch(&app, pid, &name, false, false) {
+            Ok(asked) if asked.needs_confirmation || asked.needs_restart => {
+                app::show_window(&app);
+                let _ = app.emit(
+                    "open-dialog",
+                    serde_json::json!({
+                        "kind": if asked.needs_restart { "confirm-restart" } else { "confirm-switch" },
+                        "provider": pid.as_str(),
+                        "name": name,
+                        "label": asked.replaced_label,
+                    }),
+                );
+            }
+            Ok(switched) => {
+                let _ = app.emit("switched", &switched);
+            }
+            Err(error) => {
+                app::show_window(&app);
+                let _ = app.emit(
+                    "switch-failed",
+                    serde_json::json!({ "name": name, "error": error }),
+                );
+            }
+        },
+    );
+}
